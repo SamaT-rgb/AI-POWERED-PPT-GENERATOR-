@@ -209,13 +209,8 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
         return None
 
     # --- THIS IS THE CORRECTED SECTION ---
-    if template_file:
-        # Read the uploaded file into a BytesIO buffer to ensure compatibility
-        template_buffer = BytesIO(template_file.getvalue())
-        prs = Presentation(template_buffer)
-    else:
-        # If no template, create a blank presentation
-        prs = Presentation()
+    # The 'pptx' parameter tells the library to use the provided file as a template for styles.
+    prs = Presentation(pptx=template_file) if template_file else Presentation()
     # --- END OF CORRECTION ---
     
     with st.spinner("Step 2/3: Populating slides and fetching images..."):
@@ -241,9 +236,11 @@ def main():
     pexels_key = configure_app()
 
     st.sidebar.header("🎨 Design Options")
+    # UPDATED to accept .pptx and guide the user correctly
     template_file = st.sidebar.file_uploader(
-        "Upload a PowerPoint Template (.potx)",
-        type=['potx']
+        "Upload a Design Template (.pptx)",
+        type=['pptx'],
+        help="Upload a .pptx file with your desired slide masters, fonts, and colors."
     )
     if template_file:
         st.sidebar.success(f"Using template: {template_file.name}")
@@ -268,6 +265,7 @@ def main():
     
     if st.button("🚀 Generate Presentation"):
         if text_input:
+            # We now pass the file object directly, as intended by the 'pptx' parameter.
             ppt_buffer = generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file)
             if ppt_buffer:
                 st.session_state['generated_ppt'] = ppt_buffer
