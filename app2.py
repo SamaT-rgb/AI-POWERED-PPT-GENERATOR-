@@ -5,14 +5,14 @@ import requests
 from io import BytesIO
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Inches, Pt # <--- THIS LINE IS NOW CORRECTED
+from pptx.util import Inches, Pt
+from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 from dotenv import load_dotenv
 import google.generativeai as genai
 from PIL import Image, ImageDraw, ImageFont
 
 # --- Configuration and Setup ---
-
 def configure_app():
     st.set_page_config(page_title="AI PowerPoint Pro", page_icon="✨", layout="wide")
     st.title("✨ AI PowerPoint Pro")
@@ -27,32 +27,38 @@ def configure_app():
     genai.configure(api_key=gemini_api_key)
     return pexels_api_key
 
-# --- Image Generation and Fetching (REBUILT) ---
-
+# --- Image Generation and Fetching ---
 def create_placeholder_image(text):
     width, height = 1200, 800
-    img = Image.new('RGB', (width, height), color='#E0E0E0')
+    img = Image.new('RGB', (width, height), color='#E9ECEF') # Light grey for a softer look
     draw = ImageDraw.Draw(img)
     try:
         font = ImageFont.truetype("arial.ttf", 60)
     except IOError:
         font = ImageFont.load_default(size=60)
-    text_bbox = draw.textbbox((0, 0), text, font=font, align="center")
-    position = ((width - (text_bbox[2] - text_bbox[0])) / 2, (height - (text_bbox[3] - text_bbox[1])) / 2)
-    draw.text(position, text, fill='#6c757d', font=font, align="center")
+    
+    lines = text.split('\n')
+    total_text_height = sum(draw.textbbox((0,0), line, font=font)[3] for line in lines)
+    current_y = (height - total_text_height) / 2
+
+    for line in lines:
+        text_bbox = draw.textbbox((0, 0), line, font=font, align="center")
+        position = ((width - (text_bbox[2] - text_bbox[0])) / 2, current_y)
+        draw.text(position, line, fill='#6C757D', font=font, align="center")
+        current_y += text_bbox[3] + 10 # Add spacing between lines
+
     img_buffer = BytesIO()
     img.save(img_buffer, format='PNG')
     img_buffer.seek(0)
     return img_buffer
 
 def fetch_image_from_pexels(api_key, query):
-    """Fetches an image directly from the Pexels API using requests."""
     if not api_key or not query:
         return create_placeholder_image(f"Image for:\n{query}")
     headers = {"Authorization": api_key}
     params = {"query": query, "per_page": 1, "page": 1}
     try:
-        response = requests.get("https://api.pexels.com/v1/search", headers=headers, params=params)
+        response = requests.get("https://api.pexels.com/v1/search", headers=headers, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         if not data.get("photos"):
@@ -60,14 +66,14 @@ def fetch_image_from_pexels(api_key, query):
             return create_placeholder_image(f"No image for:\n'{query}'")
         
         photo_url = data["photos"][0]["src"]["large"]
-        image_response = requests.get(photo_url)
+        image_response = requests.get(photo_url, timeout=10)
         image_response.raise_for_status()
         return BytesIO(image_response.content)
     except requests.exceptions.RequestException as e:
         st.error(f"Pexels API Error for '{query}': {e}. Using placeholder.")
         return create_placeholder_image(f"API Error for:\n'{query}'")
 
-# --- Core AI and PowerPoint Generation (REBUILT) ---
+# --- Core AI and PowerPoint Generation ---
 
 def generate_content_from_ai(prompt):
     try:
@@ -93,90 +99,123 @@ def parse_ai_response(content):
         })
     return slides_data
 
-def split_text_for_slides(text, max_chars=600):
-    """Splits long text into chunks that will fit on individual slides."""
-    if len(text) < max_chars:
-        return [text]
-    
-    paragraphs = text.split('\n')
+def split_text_for_slides(text, max_lines=8, max_chars_per_line=90):
+    """Splits long text into chunks, respecting line and character limits."""
     chunks = []
-    current_chunk = ""
-    for p in paragraphs:
-        if len(current_chunk) + len(p) < max_chars:
-            current_chunk += p + "\n"
-        else:
-            chunks.append(current_chunk)
-            current_chunk = p + "\n"
-    chunks.append(current_chunk)
+    current_chunk_lines = []
+    for line in text.split('\n'):
+        # Further split long lines
+        while len(line) > max_chars_per_line:
+            split_pos = line.rfind(' ', 0, max_chars_per_line)
+            if split_pos == -1: split_pos = max_chars_per_line
+            current_chunk_lines.append(line[:split_pos])
+            line = line[split_pos:].lstrip()
+            if len(current_chunk_lines) >= max_lines:
+                chunks.append("\n".join(current_chunk_lines))
+                current_chunk_lines = []
+        current_chunk_lines.append(line)
+        if len(current_chunk_lines) >= max_lines:
+            chunks.append("\n".join(current_chunk_lines))
+            current_chunk_lines = []
+            
+    if current_chunk_lines:
+        chunks.append("\n".join(current_chunk_lines))
     return chunks
 
-def add_slide_with_layout(prs, title, content_chunk, image_stream=None):
-    """A robust function to add a slide with a professional, programmatic layout."""
+# --- LAYOUT ENGINE 1: FOR TEMPLATES ---
+def add_slide_using_template_layout(prs, slide_info, content_chunk, image_stream=None):
+    """Finds the best layout in the template and populates its placeholders."""
+    possible_layouts = {
+        "Title Slide": ["Title Slide", "Title"],
+        "Content Slide": ["Title and Content", "Two Content", "Picture with Caption", "Content with Caption"]
+    }.get(slide_info['type'], ["Title and Content"])
+    
+    chosen_layout = next((l for l_name in possible_layouts for l in prs.slide_layouts if l.name == l_name), prs.slide_layouts[1])
+
+    slide = prs.slides.add_slide(chosen_layout)
+
+    # Populate placeholders intelligently
+    title_ph = next((s for s in slide.placeholders if 'Title' in s.name or s.placeholder_format.idx == 0), slide.shapes.title)
+    body_ph = next((s for s in slide.placeholders if 'Body' in s.name or 'Content' in s.name or s.placeholder_format.idx in [1, 10, 11]), None)
+    pic_ph = next((s for s in slide.placeholders if 'Picture' in s.name or s.placeholder_format.type == PP_PLACEHOLDER.PICTURE), None)
+    
+    if title_ph: title_ph.text = slide_info['title']
+    if body_ph:
+        body_ph.text = content_chunk
+        body_ph.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        body_ph.text_frame.word_wrap = True
+    if image_stream and pic_ph:
+        try:
+            pic_ph.insert_picture(image_stream)
+        except Exception as e:
+            st.error(f"Could not insert picture into placeholder: {e}")
+
+# --- LAYOUT ENGINE 2: FOR BLANK PRESENTATIONS ---
+def add_slide_with_programmatic_layout(prs, title, content_chunk, image_stream=None):
+    """Creates a clean, professional layout from scratch on a blank slide."""
     blank_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(blank_layout)
 
     title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1.0))
     title_frame = title_box.text_frame
     title_frame.text = title
-    title_frame.paragraphs[0].font.size = Pt(36)
-    title_frame.paragraphs[0].font.bold = True
-    title_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
-
+    p = title_frame.paragraphs[0]
+    p.font.size, p.font.bold, p.alignment = Pt(36), True, PP_ALIGN.LEFT
+    
     if image_stream:
-        text_left, text_top, text_width, text_height = Inches(0.5), Inches(1.2), Inches(4.5), Inches(5.8)
-        img_left, img_top, img_width, img_height = Inches(5.5), Inches(1.5), Inches(4.0), Inches(5.5)
+        text_container = {"left": Inches(0.5), "top": Inches(1.2), "width": Inches(4.5), "height": Inches(5.8)}
+        img_container = {"left": Inches(5.5), "top": Inches(1.5), "width": Inches(4.0), "height": Inches(5.5)}
 
-        text_box = slide.shapes.add_textbox(text_left, text_top, text_width, text_height)
+        text_box = slide.shapes.add_textbox(**text_container)
         text_frame = text_box.text_frame
         text_frame.text = content_chunk
+        text_frame.word_wrap, text_frame.auto_size = True, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
         text_frame.paragraphs[0].font.size = Pt(16)
-        text_frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
-
+        
         try:
-            image_stream.seek(0) # Ensure buffer is at the beginning
+            image_stream.seek(0)
             img = Image.open(image_stream)
             img_w, img_h = img.size
-            
-            f_w = img_width / Inches(img_w / 914400) # Convert EMU to Inches for calc
-            f_h = img_height / Inches(img_h / 914400)
-            f = min(f_w, f_h)
-            new_w, new_h = Inches(img_w * f / 914400), Inches(img_h * f / 914400)
+            aspect_ratio = float(img_w) / img_h
+            container_aspect = float(img_container["width"]) / img_container["height"]
+            image_stream.seek(0)
 
-            final_img_left = img_left + (img_width - new_w) / 2
-            final_img_top = img_top + (img_height - new_h) / 2
-            
-            image_stream.seek(0) # Rewind buffer before adding picture
-            slide.shapes.add_picture(image_stream, final_img_left, final_img_top, width=new_w, height=new_h)
+            if aspect_ratio > container_aspect:
+                pic = slide.shapes.add_picture(image_stream, img_container["left"], img_container["top"], width=img_container["width"])
+            else:
+                pic = slide.shapes.add_picture(image_stream, img_container["left"], img_container["top"], height=img_container["height"])
+
+            pic.left = img_container["left"] + (img_container["width"] - pic.width) / 2
+            pic.top = img_container["top"] + (img_container["height"] - pic.height) / 2
         except Exception as e:
             st.error(f"Could not add image to slide: {e}")
-            
     else:
-        text_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(9), Inches(5.8))
+        text_container = {"left": Inches(0.5), "top": Inches(1.2), "width": Inches(9), "height": Inches(5.8)}
+        text_box = slide.shapes.add_textbox(**text_container)
         text_frame = text_box.text_frame
         text_frame.text = content_chunk
+        text_frame.word_wrap, text_frame.auto_size = True, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
         text_frame.paragraphs[0].font.size = Pt(18)
-        text_frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
 
+# --- MAIN GENERATION FUNCTION ---
 def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file):
     prompt = f"""
     Create a professional presentation outline from this text: "{text_input}".
     Generate 4 slides: one "Title Slide" and three "Content Slides".
-    For each slide, specify its "Slide Type", a "Title", "Content" (as bullet points), and an "Image Search Query".
+    For each slide, specify its "Slide Type", a "Title", "Content", and an "Image Search Query".
     Format the output strictly as follows, using '---' as a separator:
 
     Slide Type: Title Slide
     Title: [Catchy Title Here]
-    Content: [A brief, engaging subtitle or key takeaway]
-    Image Search Query: [A query for a powerful opening image]
-
+    Content: [A brief subtitle]
+    Image Search Query: [A powerful opening image query]
     ---
-
     Slide Type: Content Slide
     Title: [Informative Title Here]
     Content: - First key point...
-    Image Search Query: [A specific query for an image]
+    Image Search Query: [A specific image query]
     """
-    with st.spinner("Step 1/3: Generating presentation script with AI..."):
+    with st.spinner("Step 1/3: Generating presentation script..."):
         content = generate_content_from_ai(prompt)
         if not content: return None
         slides_data = parse_ai_response(content)
@@ -185,6 +224,13 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
             return None
 
     prs = Presentation(pptx=template_file) if template_file else Presentation()
+
+    if template_file:
+        # Clear existing demo slides from the template
+        xml_slides = prs.slides._sldIdLst
+        slides_to_remove = list(xml_slides)
+        for sld in slides_to_remove:
+            xml_slides.remove(sld)
     
     with st.spinner("Step 2/3: Populating slides and fetching images..."):
         user_image_idx = 0
@@ -199,9 +245,16 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
             content_chunks = split_text_for_slides(slide_info['content'])
             
             for i, chunk in enumerate(content_chunks):
-                slide_title = slide_info['title'] if i == 0 else f"{slide_info['title']} (cont.)"
+                slide_info_for_chunk = slide_info.copy()
+                if i > 0:
+                    slide_info_for_chunk['title'] = f"{slide_info['title']} (cont.)"
+                
                 image_for_this_slide = image_to_add if i == 0 else None
-                add_slide_with_layout(prs, slide_title, chunk, image_for_this_slide)
+                
+                if template_file:
+                    add_slide_using_template_layout(prs, slide_info_for_chunk, chunk, image_for_this_slide)
+                else:
+                    add_slide_with_programmatic_layout(prs, slide_info_for_chunk['title'], chunk, image_for_this_slide)
 
     with st.spinner("Step 3/3: Finalizing presentation..."):
         ppt_buffer = BytesIO()
@@ -217,12 +270,12 @@ def main():
     template_file = st.sidebar.file_uploader(
         "Upload a Design Template (.pptx)",
         type=['pptx'],
-        help="Upload a .pptx file. The AI will use its slide masters, fonts, and colors."
+        help="Upload a .pptx file. The app will use its slide masters, fonts, and colors."
     )
     if template_file:
         st.sidebar.success(f"Using template: {template_file.name}")
     else:
-        st.sidebar.info("No template uploaded. Using default design.")
+        st.sidebar.info("No template uploaded. Using default programmatic design.")
 
     st.sidebar.header("🖼️ Image Options")
     auto_image = st.sidebar.checkbox("Find images automatically", value=True)
@@ -231,7 +284,7 @@ def main():
     st.header("✍️ Content Input")
     st.info("The AI will automatically split long content across multiple slides.")
     text_input = st.text_area("Enter the topic or text for your presentation:", height=200, 
-        value="Dogs – Man’s Best Friend. Discuss their evolution from wolves, the variety of breeds, and their crucial roles in society as companions, workers, and heroes. Emphasize the deep bond between humans and dogs, the importance of responsible pet ownership, and the need for animal welfare. Also cover their use as service animals, therapy dogs, and in law enforcement.")
+        value="The importance of renewable energy. Discuss solar, wind, and hydro power. Cover the environmental benefits, economic advantages, and future challenges of transitioning to a green economy.")
     
     if st.button("🚀 Generate Presentation"):
         if text_input:
@@ -241,7 +294,7 @@ def main():
                 st.session_state['ppt_name'] = "AI_Generated_Presentation.pptx"
                 st.success("Presentation generated successfully!")
         else:
-            st.warning("Please enter some text to generate a presentation.")
+            st.warning("Please enter some text.")
 
     if 'generated_ppt' in st.session_state and st.session_state['generated_ppt']:
         st.download_button(
