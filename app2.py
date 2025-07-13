@@ -5,7 +5,7 @@ import requests
 from io import BytesIO
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Inches, Pt # <--- THIS LINE IS NOW CORRECTED
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -112,11 +112,9 @@ def split_text_for_slides(text, max_chars=600):
 
 def add_slide_with_layout(prs, title, content_chunk, image_stream=None):
     """A robust function to add a slide with a professional, programmatic layout."""
-    # Use a blank layout and build everything ourselves for maximum control
     blank_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(blank_layout)
 
-    # Add Title
     title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1.0))
     title_frame = title_box.text_frame
     title_frame.text = title
@@ -125,39 +123,34 @@ def add_slide_with_layout(prs, title, content_chunk, image_stream=None):
     title_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
 
     if image_stream:
-        # --- TEXT & IMAGE LAYOUT ---
-        # Define bounding boxes
         text_left, text_top, text_width, text_height = Inches(0.5), Inches(1.2), Inches(4.5), Inches(5.8)
         img_left, img_top, img_width, img_height = Inches(5.5), Inches(1.5), Inches(4.0), Inches(5.5)
 
-        # Add and format text box
         text_box = slide.shapes.add_textbox(text_left, text_top, text_width, text_height)
         text_frame = text_box.text_frame
         text_frame.text = content_chunk
         text_frame.paragraphs[0].font.size = Pt(16)
         text_frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
 
-        # Add and scale image
         try:
+            image_stream.seek(0) # Ensure buffer is at the beginning
             img = Image.open(image_stream)
             img_w, img_h = img.size
             
-            # Calculate the best fit while maintaining aspect ratio
-            f_w = img_width / img_w
-            f_h = img_height / img_h
+            f_w = img_width / Inches(img_w / 914400) # Convert EMU to Inches for calc
+            f_h = img_height / Inches(img_h / 914400)
             f = min(f_w, f_h)
-            new_w, new_h = Inches(img_w * f), Inches(img_h * f)
+            new_w, new_h = Inches(img_w * f / 914400), Inches(img_h * f / 914400)
 
-            # Center the image in its bounding box
             final_img_left = img_left + (img_width - new_w) / 2
             final_img_top = img_top + (img_height - new_h) / 2
             
+            image_stream.seek(0) # Rewind buffer before adding picture
             slide.shapes.add_picture(image_stream, final_img_left, final_img_top, width=new_w, height=new_h)
         except Exception as e:
             st.error(f"Could not add image to slide: {e}")
             
     else:
-        # --- TEXT-ONLY LAYOUT ---
         text_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(9), Inches(5.8))
         text_frame = text_box.text_frame
         text_frame.text = content_chunk
@@ -203,13 +196,10 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
             elif auto_image and pexels_key:
                 image_to_add = fetch_image_from_pexels(pexels_key, slide_info['query'])
             
-            # Split long content into multiple slides
             content_chunks = split_text_for_slides(slide_info['content'])
             
             for i, chunk in enumerate(content_chunks):
-                # Only add the title to the first slide of a topic
                 slide_title = slide_info['title'] if i == 0 else f"{slide_info['title']} (cont.)"
-                # Only add the image to the first slide of a topic
                 image_for_this_slide = image_to_add if i == 0 else None
                 add_slide_with_layout(prs, slide_title, chunk, image_for_this_slide)
 
@@ -263,4 +253,4 @@ def main():
         )
 
 if __name__ == "__main__":
-    main()```
+    main()
