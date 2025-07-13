@@ -9,6 +9,7 @@ import seaborn as sns
 import streamlit as st
 from pptx import Presentation
 from pptx.util import Inches
+from pptx.enum.shapes import PP_PLACEHOLDER # <--- NEW, REQUIRED IMPORT
 from dotenv import load_dotenv
 import google.generativeai as genai
 from pexels_api import API as PexelsAPI
@@ -70,11 +71,16 @@ def fetch_image(api_key, query):
     try:
         api = PexelsAPI(api_key)
         api.search(query, page=1, results_per_page=1)
-        if not api.photos:
+        
+        # --- BUG FIX #1: Correctly access the photo results ---
+        photos = api.get_entries()
+        if not photos:
             st.warning(f"No image found for query: '{query}'. Using placeholder.")
             return create_placeholder_image(f"No image found for:\n'{query}'")
         
-        photo_url = api.photos[0].src['large']
+        photo_url = photos[0].src['large']
+        # --- END OF BUG FIX #1 ---
+
         response = requests.get(photo_url)
         response.raise_for_status()
         return BytesIO(response.content)
@@ -160,7 +166,9 @@ def add_slide_to_presentation(prs, slide_data, image_stream):
     if image_stream:
         pic_placeholder = None
         for shape in slide.placeholders:
-            if "Picture" in shape.name or 'PIC' in shape.placeholder_format.type:
+            # --- BUG FIX #2: Correctly check the placeholder type ---
+            if "Picture" in shape.name or shape.placeholder_format.type == PP_PLACEHOLDER.PICTURE:
+            # --- END OF BUG FIX #2 ---
                 pic_placeholder = shape
                 break
         
@@ -208,10 +216,7 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
         st.error("AI did not return a valid structure. Please check the prompt or try again.")
         return None
 
-    # --- THIS IS THE CORRECTED SECTION ---
-    # The 'pptx' parameter tells the library to use the provided file as a template for styles.
     prs = Presentation(pptx=template_file) if template_file else Presentation()
-    # --- END OF CORRECTION ---
     
     with st.spinner("Step 2/3: Populating slides and fetching images..."):
         for i, slide_info in enumerate(slides_data):
@@ -236,7 +241,6 @@ def main():
     pexels_key = configure_app()
 
     st.sidebar.header("🎨 Design Options")
-    # UPDATED to accept .pptx and guide the user correctly
     template_file = st.sidebar.file_uploader(
         "Upload a Design Template (.pptx)",
         type=['pptx'],
@@ -261,11 +265,10 @@ def main():
     
     st.header("✍️ Content Input")
     text_input = st.text_area("Enter the topic or text for your presentation:", height=200, 
-        value="The importance of renewable energy. Discuss solar, wind, and hydro power. Cover the environmental benefits, economic advantages, and future challenges of transitioning to a green economy.")
+        value="Dogs – Man’s Best Friend and a True Symbol of Loyalty. Their evolution from wolves, different breeds, and their roles in society as companions, workers, and heroes. Also, the importance of responsible pet ownership.")
     
     if st.button("🚀 Generate Presentation"):
         if text_input:
-            # We now pass the file object directly, as intended by the 'pptx' parameter.
             ppt_buffer = generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file)
             if ppt_buffer:
                 st.session_state['generated_ppt'] = ppt_buffer
