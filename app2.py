@@ -14,11 +14,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 # --- Configuration and Setup ---
 def configure_app():
-    st.set_page_config(page_title="AI PowerPoint Pro", page_icon="✨", layout="wide")
-    st.title("✨ AI PowerPoint Pro")
+    st.set_page_config(page_title="AI Presentation Architect", page_icon="✨", layout="wide")
+    st.title("✨ AI Presentation Architect")
     load_dotenv()
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    pexels_api_key = os.getenv("PEXELS_API_KEY")
+    gemini_api_key, pexels_api_key = os.getenv("GEMINI_API_KEY"), os.getenv("PEXELS_API_KEY")
     if not gemini_api_key: st.error("GEMINI_API_KEY not found."); st.stop()
     if not pexels_api_key: st.warning("PEXELS_API_KEY not found. Image search disabled.")
     genai.configure(api_key=gemini_api_key)
@@ -53,7 +52,6 @@ def fetch_image_from_pexels(api_key, query):
         st.error(f"Pexels API Error: {e}. Using placeholder."); return create_placeholder_image(f"API Error for:\n'{query}'")
 
 # --- Core AI and PowerPoint Generation ---
-
 def generate_content_from_ai(prompt):
     try: model = genai.GenerativeModel('gemini-1.5-flash'); return model.generate_content(prompt).text
     except Exception as e: st.error(f"AI model error: {e}"); return None
@@ -62,10 +60,7 @@ def parse_ai_response(content):
     slides_data = []
     slide_blocks = re.findall(r'Slide Type:\s*(.*?)\nTitle:\s*(.*?)\nContent:\s*(.*?)\nImage Search Query:\s*(.*?)(?=\n\n---|\Z)', content, re.DOTALL)
     for type, title, cont, query in slide_blocks:
-        slides_data.append({
-            "type": type.strip(), "title": title.strip(),
-            "content": cont.strip().replace('- ', '\n• ').lstrip('\n'), "query": query.strip()
-        })
+        slides_data.append({"type": type.strip(), "title": title.strip(), "content": cont.strip().replace('- ', '\n• ').lstrip('\n'), "query": query.strip()})
     return slides_data
 
 def split_text_for_slides(text, max_lines=8, max_chars_per_line=90):
@@ -102,13 +97,13 @@ def add_slide_using_template_layout(prs, slide_info, content_chunk, image_stream
 # --- LAYOUT ENGINE 2: FOR BLANK PRESENTATIONS ---
 def add_slide_with_programmatic_layout(prs, title, content_chunk, image_stream=None):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1.0))
-    p = title_box.text_frame.paragraphs[0]; p.text, p.font.size, p.font.bold, p.alignment = title, Pt(36), True, PP_ALIGN.LEFT
+    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1.0)); p = title_box.text_frame.paragraphs[0]
+    p.text, p.font.size, p.font.bold, p.alignment = title, Pt(36), True, PP_ALIGN.LEFT
     if image_stream:
         text_container = {"left": Inches(0.5), "top": Inches(1.2), "width": Inches(4.5), "height": Inches(5.8)}
         img_container = {"left": Inches(5.5), "top": Inches(1.5), "width": Inches(4.0), "height": Inches(5.5)}
-        text_box = slide.shapes.add_textbox(**text_container)
-        tf = text_box.text_frame; tf.text, tf.word_wrap, tf.auto_size = content_chunk, True, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        text_box = slide.shapes.add_textbox(**text_container); tf = text_box.text_frame
+        tf.text, tf.word_wrap, tf.auto_size = content_chunk, True, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
         tf.paragraphs[0].font.size = Pt(16)
         try:
             image_stream.seek(0); img = Image.open(image_stream)
@@ -120,43 +115,19 @@ def add_slide_with_programmatic_layout(prs, title, content_chunk, image_stream=N
         except Exception as e: st.error(f"Could not add image: {e}")
     else:
         text_container = {"left": Inches(0.5), "top": Inches(1.2), "width": Inches(9), "height": Inches(5.8)}
-        text_box = slide.shapes.add_textbox(**text_container)
-        tf = text_box.text_frame; tf.text, tf.word_wrap, tf.auto_size = content_chunk, True, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        text_box = slide.shapes.add_textbox(**text_container); tf = text_box.text_frame
+        tf.text, tf.word_wrap, tf.auto_size = content_chunk, True, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
         tf.paragraphs[0].font.size = Pt(18)
 
 # --- MAIN GENERATION FUNCTION ---
-def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file):
-    # --- THIS IS THE NEW, UPGRADED PROMPT ---
-    prompt = f"""
-    You are an expert presentation creator. Your task is to create a compelling 6-slide presentation outline based on the following text.
-    The presentation must have a clear beginning, middle, and end.
-
-    Here is the required structure:
-    - Slide 1: A 'Title Slide' with a catchy main title and a brief, engaging subtitle.
-    - Slides 2-5: Four 'Content Slides' that logically break down the main points of the text. Each should have a clear title and 3-5 bullet points.
-    - Slide 6: A 'Conclusion Slide' with a title like 'Thank You' or 'Key Takeaways', and a concluding statement or call to action.
-
-    For each of the 6 slides, you must specify its "Slide Type", a "Title", "Content", and an "Image Search Query" for a relevant photo.
-    Format the output strictly as follows, using '---' as a separator:
-
-    Slide Type: [Type of Slide]
-    Title: [Title Here]
-    Content: [Content or bullet points here]
-    Image Search Query: [A specific query for an image]
-    ---
-    
-    Text to analyze: "{text_input}"
-    """
-    with st.spinner("Step 1/3: Generating presentation script..."):
+def generate_ppt(prompt, user_images, auto_image, pexels_key, template_file):
+    with st.spinner("Step 1/3: Generating presentation script with AI..."):
         content = generate_content_from_ai(prompt)
         if not content: return None
         slides_data = parse_ai_response(content)
-        if not slides_data or len(slides_data) < 5: # Check for at least a reasonable number of slides
-            st.error("AI did not return a valid structure. Please try again."); return None
-
+        if not slides_data or len(slides_data) < 5: st.error("AI did not return a valid structure."); return None
     prs = Presentation(pptx=template_file) if template_file else Presentation()
-    
-    with st.spinner("Step 2/3: Populating slides..."):
+    with st.spinner("Step 2/3: Populating slides and fetching images..."):
         user_image_idx = 0
         for slide_info in slides_data:
             image_to_add = None
@@ -164,19 +135,13 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
                 image_to_add = user_images[user_image_idx]; user_image_idx += 1
             elif auto_image and pexels_key and slide_info['query'].lower() not in ['none', 'n/a']:
                 image_to_add = fetch_image_from_pexels(pexels_key, slide_info['query'])
-            
             content_chunks = split_text_for_slides(slide_info['content'])
-            
             for i, chunk in enumerate(content_chunks):
                 current_slide_info = slide_info.copy()
                 if i > 0: current_slide_info['title'] = f"{slide_info['title']} (cont.)"
                 image_for_this_slide = image_to_add if i == 0 else None
-                
-                if template_file:
-                    add_slide_using_template_layout(prs, current_slide_info, chunk, image_for_this_slide)
-                else:
-                    add_slide_with_programmatic_layout(prs, current_slide_info['title'], chunk, image_for_this_slide)
-
+                if template_file: add_slide_using_template_layout(prs, current_slide_info, chunk, image_for_this_slide)
+                else: add_slide_with_programmatic_layout(prs, current_slide_info['title'], chunk, image_for_this_slide)
     with st.spinner("Step 3/3: Finalizing presentation..."):
         ppt_buffer = BytesIO(); prs.save(ppt_buffer); ppt_buffer.seek(0)
     return ppt_buffer
@@ -185,23 +150,74 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
 def main():
     pexels_key = configure_app()
     st.sidebar.header("🎨 Design Options")
-    template_file = st.sidebar.file_uploader("Upload a Design Template (.pptx)", type=['pptx'], help="Upload a .pptx file. Its slide masters, fonts, and colors will be used.")
-    if template_file: st.sidebar.success(f"Using template: {template_file.name}")
-    else: st.sidebar.info("No template uploaded. Using default programmatic design.")
+    template_file = st.sidebar.file_uploader("Upload a Design Template (.pptx)", type=['pptx'], help="Use a .pptx file with your desired slide masters, fonts, and colors.")
     st.sidebar.header("🖼️ Image Options")
     auto_image = st.sidebar.checkbox("Find images automatically", value=True)
     user_images = st.sidebar.file_uploader("Or upload your own images", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
-    st.header("✍️ Content Input")
-    st.info("The AI will now create a structured 6-slide presentation with a title and conclusion.")
-    text_input = st.text_area("Enter the topic or text for your presentation:", height=200, 
-        value="The importance of renewable energy. Discuss solar, wind, and hydro power. Cover the environmental benefits, economic advantages, and future challenges of transitioning to a green economy.")
-    if st.button("🚀 Generate Presentation"):
-        if text_input:
-            ppt_buffer = generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file)
-            if ppt_buffer:
-                st.session_state['generated_ppt'] = ppt_buffer; st.session_state['ppt_name'] = "AI_Generated_Presentation.pptx"
-                st.success("Presentation generated successfully!")
-        else: st.warning("Please enter some text.")
+    
+    st.header("✍️ Content Creation Mode")
+    
+    # --- NEW: TWO-MODE UI ---
+    tab1, tab2 = st.tabs(["💡 Generate from Topic", "📋 Generate from Text"])
+
+    with tab1:
+        topic_input = st.text_input("Enter a topic (e.g., 'The Future of Artificial Intelligence'):")
+        if st.button("🚀 Generate from Topic"):
+            if topic_input:
+                prompt = f"""
+                You are a subject matter expert and expert presentation creator. Your task is to generate the content for a compelling 6-slide presentation on the following topic: "{topic_input}".
+                The presentation must have a clear beginning, middle, and end.
+
+                Required structure:
+                - Slide 1: A 'Title Slide' with a catchy main title and an engaging subtitle.
+                - Slides 2-5: Four 'Content Slides' that explore key aspects of the topic. Each must have a clear title and 3-5 bullet points.
+                - Slide 6: A 'Conclusion Slide' with a title like 'Thank You' or 'Key Takeaways', and a concluding statement.
+
+                For each slide, you must specify its "Slide Type", "Title", "Content", and an "Image Search Query". Format the output strictly as follows, using '---' as a separator:
+
+                Slide Type: [Type of Slide]
+                Title: [Title Here]
+                Content: [Content or bullet points here]
+                Image Search Query: [A specific query for an image]
+                ---
+                """
+                ppt_buffer = generate_ppt(prompt, user_images, auto_image, pexels_key, template_file)
+                if ppt_buffer:
+                    st.session_state['generated_ppt'] = ppt_buffer; st.session_state['ppt_name'] = "AI_Generated_Presentation.pptx"
+                    st.success("Presentation generated successfully!")
+            else:
+                st.warning("Please enter a topic.")
+
+    with tab2:
+        text_input = st.text_area("Paste your full text, article, or notes here:", height=250)
+        if st.button("🚀 Generate from Text"):
+            if text_input:
+                prompt = f"""
+                You are an expert presentation designer. Your task is to summarize and structure the following text into a compelling 6-slide presentation.
+                The presentation must have a clear beginning, middle, and end.
+
+                Required structure:
+                - Slide 1: A 'Title Slide' with a catchy title based on the text's main theme and a brief subtitle.
+                - Slides 2-5: Four 'Content Slides' that summarize the key points of the text.
+                - Slide 6: A 'Conclusion Slide' with a title like 'Thank You' or 'Key Takeaways', and a concluding statement.
+
+                For each slide, you must specify its "Slide Type", "Title", "Content", and an "Image Search Query". Format the output strictly as follows, using '---' as a separator:
+
+                Slide Type: [Type of Slide]
+                Title: [Title Here]
+                Content: [Content or bullet points here]
+                Image Search Query: [A specific query for an image]
+                ---
+                
+                Text to analyze: "{text_input}"
+                """
+                ppt_buffer = generate_ppt(prompt, user_images, auto_image, pexels_key, template_file)
+                if ppt_buffer:
+                    st.session_state['generated_ppt'] = ppt_buffer; st.session_state['ppt_name'] = "AI_Generated_Presentation.pptx"
+                    st.success("Presentation generated successfully!")
+            else:
+                st.warning("Please paste your text.")
+
     if 'generated_ppt' in st.session_state and st.session_state['generated_ppt']:
         st.download_button(label="⬇️ Download Presentation", data=st.session_state['generated_ppt'], file_name=st.session_state['ppt_name'], mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", on_click=lambda: st.session_state.update({'generated_ppt': None}))
 
