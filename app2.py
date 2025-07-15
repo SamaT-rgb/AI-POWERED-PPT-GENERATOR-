@@ -60,10 +60,7 @@ def generate_content_from_ai(prompt):
 
 def parse_ai_response(content):
     slides_data = []
-    slide_blocks = re.findall(
-        r'Slide Type:\s*(.*?)\nTitle:\s*(.*?)\nContent:\s*(.*?)\nImage Search Query:\s*(.*?)(?=\n\n---|\Z)',
-        content, re.DOTALL
-    )
+    slide_blocks = re.findall(r'Slide Type:\s*(.*?)\nTitle:\s*(.*?)\nContent:\s*(.*?)\nImage Search Query:\s*(.*?)(?=\n\n---|\Z)', content, re.DOTALL)
     for type, title, cont, query in slide_blocks:
         slides_data.append({
             "type": type.strip(), "title": title.strip(),
@@ -83,42 +80,30 @@ def split_text_for_slides(text, max_lines=8, max_chars_per_line=90):
     if current_lines: chunks.append("\n".join(current_lines))
     return chunks if chunks else [""]
 
-# --- LAYOUT ENGINE 1: FOR TEMPLATES (REBUILT) ---
-def find_placeholders(slide):
-    """Intelligently finds title, content, and picture placeholders on a slide."""
-    placeholders = {'title': None, 'body': None, 'pic': None}
-    for shape in slide.placeholders:
-        if shape.is_placeholder:
-            ph_type = shape.placeholder_format.type
-            if ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE): placeholders['title'] = shape
-            elif ph_type in (PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.OBJECT): placeholders['body'] = shape
-            elif ph_type == PP_PLACEHOLDER.PICTURE: placeholders['pic'] = shape
-    # Fallback for title if it's not a standard placeholder
-    if not placeholders['title'] and slide.shapes.has_title: placeholders['title'] = slide.shapes.title
-    return placeholders
-
+# --- LAYOUT ENGINE 1: FOR TEMPLATES ---
 def add_slide_using_template_layout(prs, slide_info, content_chunk, image_stream=None):
-    """Finds the best layout in the template and populates its placeholders."""
     layout_names = {"Title Slide": ["Title Slide", "Title"], "Content Slide": ["Title and Content", "Picture with Caption", "Two Content"]}.get(slide_info['type'], ["Title and Content"])
     chosen_layout = next((l for name in layout_names for l in prs.slide_layouts if l.name == name), prs.slide_layouts[1])
     slide = prs.slides.add_slide(chosen_layout)
-    placeholders = find_placeholders(slide)
-    
+    placeholders = {'title': getattr(slide.shapes, 'title', None), 'body': None, 'pic': None}
+    for shape in slide.placeholders:
+        ph_type = shape.placeholder_format.type
+        if ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE) and not placeholders['title']: placeholders['title'] = shape
+        elif ph_type in (PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.OBJECT): placeholders['body'] = shape
+        elif ph_type == PP_PLACEHOLDER.PICTURE: placeholders['pic'] = shape
     if placeholders['title']: placeholders['title'].text = slide_info['title']
     if placeholders['body']:
         placeholders['body'].text = content_chunk
         placeholders['body'].text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE; placeholders['body'].text_frame.word_wrap = True
     if image_stream and placeholders['pic']:
         try: placeholders['pic'].insert_picture(image_stream)
-        except Exception as e: st.error(f"Could not insert picture: {e}")
+        except Exception as e: st.error(f"Could not insert picture into placeholder: {e}")
 
-# --- LAYOUT ENGINE 2: FOR BLANK PRESENTATIONS (UNCHANGED) ---
+# --- LAYOUT ENGINE 2: FOR BLANK PRESENTATIONS ---
 def add_slide_with_programmatic_layout(prs, title, content_chunk, image_stream=None):
-    """Creates a clean, professional layout from scratch on a blank slide."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1.0))
     p = title_box.text_frame.paragraphs[0]; p.text, p.font.size, p.font.bold, p.alignment = title, Pt(36), True, PP_ALIGN.LEFT
-    
     if image_stream:
         text_container = {"left": Inches(0.5), "top": Inches(1.2), "width": Inches(4.5), "height": Inches(5.8)}
         img_container = {"left": Inches(5.5), "top": Inches(1.5), "width": Inches(4.0), "height": Inches(5.5)}
@@ -148,9 +133,17 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
         slides_data = parse_ai_response(content)
         if not slides_data: st.error("AI did not return a valid structure."); return None
 
-    # This creates a NEW presentation inheriting styles from the template, or a blank one. NO DELETION NEEDED.
-    prs = Presentation(pptx=template_file) if template_file else Presentation()
-    
+    prs = Presentation(template_file) if template_file else Presentation()
+
+    # --- THIS IS THE CORRECTED, STABLE WAY TO DELETE ALL SLIDES ---
+    if template_file:
+        # Access the low-level XML object that holds the slide list
+        xml_slides = prs.slides._sldIdLst
+        # Create a list of all slide elements to remove, as we can't modify the list while iterating
+        slides_to_remove = list(xml_slides)
+        for sld in slides_to_remove:
+            xml_slides.remove(sld)
+
     with st.spinner("Step 2/3: Populating slides..."):
         user_image_idx = 0
         for slide_info in slides_data:
@@ -164,8 +157,10 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
                 current_slide_info = slide_info.copy()
                 if i > 0: current_slide_info['title'] = f"{slide_info['title']} (cont.)"
                 image_for_this_slide = image_to_add if i == 0 else None
-                if template_file: add_slide_using_template_layout(prs, current_slide_info, chunk, image_for_this_slide)
-                else: add_slide_with_programmatic_layout(prs, current_slide_info['title'], chunk, image_for_this_slide)
+                if template_file:
+                    add_slide_using_template_layout(prs, current_slide_info, chunk, image_for_this_slide)
+                else:
+                    add_slide_with_programmatic_layout(prs, current_slide_info['title'], chunk, image_for_this_slide)
 
     with st.spinner("Step 3/3: Finalizing presentation..."):
         ppt_buffer = BytesIO(); prs.save(ppt_buffer); ppt_buffer.seek(0)
@@ -175,7 +170,7 @@ def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, temp
 def main():
     pexels_key = configure_app()
     st.sidebar.header("🎨 Design Options")
-    template_file = st.sidebar.file_uploader("Upload a Design Template (.pptx)", type=['pptx'], help="Upload a .pptx file. The app will use its slide masters, fonts, and colors.")
+    template_file = st.sidebar.file_uploader("Upload a Design Template (.pptx)", type=['pptx'], help="Upload a .pptx file. Its slide masters, fonts, and colors will be used.")
     if template_file: st.sidebar.success(f"Using template: {template_file.name}")
     else: st.sidebar.info("No template uploaded. Using default programmatic design.")
     st.sidebar.header("🖼️ Image Options")
