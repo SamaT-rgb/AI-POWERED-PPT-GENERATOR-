@@ -82,7 +82,7 @@ def split_text_for_slides(text, max_lines=8, max_chars_per_line=90):
 
 # --- LAYOUT ENGINE 1: FOR TEMPLATES ---
 def add_slide_using_template_layout(prs, slide_info, content_chunk, image_stream=None):
-    layout_names = {"Title Slide": ["Title Slide", "Title"], "Content Slide": ["Title and Content", "Picture with Caption", "Two Content"]}.get(slide_info['type'], ["Title and Content"])
+    layout_names = {"Title Slide": ["Title Slide", "Title"], "Content Slide": ["Title and Content", "Picture with Caption", "Two Content"], "Conclusion Slide": ["Section Header", "Title and Content"]}.get(slide_info['type'], ["Title and Content"])
     chosen_layout = next((l for name in layout_names for l in prs.slide_layouts if l.name == name), prs.slide_layouts[1])
     slide = prs.slides.add_slide(chosen_layout)
     placeholders = {'title': getattr(slide.shapes, 'title', None), 'body': None, 'pic': None}
@@ -126,37 +126,52 @@ def add_slide_with_programmatic_layout(prs, title, content_chunk, image_stream=N
 
 # --- MAIN GENERATION FUNCTION ---
 def generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file):
-    prompt = f'Create a professional presentation outline from this text: "{text_input}". Generate 4 slides: one "Title Slide" and three "Content Slides". For each slide, specify its "Slide Type", a "Title", "Content", and an "Image Search Query". Format the output strictly as follows, using \'---\' as a separator:\n\nSlide Type: Title Slide\nTitle: [Catchy Title Here]\nContent: [A brief subtitle]\nImage Search Query: [A powerful opening image query]\n---\nSlide Type: Content Slide\nTitle: [Informative Title Here]\nContent: - First key point...\nImage Search Query: [A specific image query]'
+    # --- THIS IS THE NEW, UPGRADED PROMPT ---
+    prompt = f"""
+    You are an expert presentation creator. Your task is to create a compelling 6-slide presentation outline based on the following text.
+    The presentation must have a clear beginning, middle, and end.
+
+    Here is the required structure:
+    - Slide 1: A 'Title Slide' with a catchy main title and a brief, engaging subtitle.
+    - Slides 2-5: Four 'Content Slides' that logically break down the main points of the text. Each should have a clear title and 3-5 bullet points.
+    - Slide 6: A 'Conclusion Slide' with a title like 'Thank You' or 'Key Takeaways', and a concluding statement or call to action.
+
+    For each of the 6 slides, you must specify its "Slide Type", a "Title", "Content", and an "Image Search Query" for a relevant photo.
+    Format the output strictly as follows, using '---' as a separator:
+
+    Slide Type: [Type of Slide]
+    Title: [Title Here]
+    Content: [Content or bullet points here]
+    Image Search Query: [A specific query for an image]
+    ---
+    
+    Text to analyze: "{text_input}"
+    """
     with st.spinner("Step 1/3: Generating presentation script..."):
         content = generate_content_from_ai(prompt)
         if not content: return None
         slides_data = parse_ai_response(content)
-        if not slides_data: st.error("AI did not return a valid structure."); return None
+        if not slides_data or len(slides_data) < 5: # Check for at least a reasonable number of slides
+            st.error("AI did not return a valid structure. Please try again."); return None
 
-    prs = Presentation(template_file) if template_file else Presentation()
-
-    # --- THIS IS THE CORRECTED, STABLE WAY TO DELETE ALL SLIDES ---
-    if template_file:
-        # Access the low-level XML object that holds the slide list
-        xml_slides = prs.slides._sldIdLst
-        # Create a list of all slide elements to remove, as we can't modify the list while iterating
-        slides_to_remove = list(xml_slides)
-        for sld in slides_to_remove:
-            xml_slides.remove(sld)
-
+    prs = Presentation(pptx=template_file) if template_file else Presentation()
+    
     with st.spinner("Step 2/3: Populating slides..."):
         user_image_idx = 0
         for slide_info in slides_data:
             image_to_add = None
             if user_image_idx < len(user_images):
                 image_to_add = user_images[user_image_idx]; user_image_idx += 1
-            elif auto_image and pexels_key:
+            elif auto_image and pexels_key and slide_info['query'].lower() not in ['none', 'n/a']:
                 image_to_add = fetch_image_from_pexels(pexels_key, slide_info['query'])
+            
             content_chunks = split_text_for_slides(slide_info['content'])
+            
             for i, chunk in enumerate(content_chunks):
                 current_slide_info = slide_info.copy()
                 if i > 0: current_slide_info['title'] = f"{slide_info['title']} (cont.)"
                 image_for_this_slide = image_to_add if i == 0 else None
+                
                 if template_file:
                     add_slide_using_template_layout(prs, current_slide_info, chunk, image_for_this_slide)
                 else:
@@ -177,8 +192,9 @@ def main():
     auto_image = st.sidebar.checkbox("Find images automatically", value=True)
     user_images = st.sidebar.file_uploader("Or upload your own images", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
     st.header("✍️ Content Input")
-    st.info("The AI will automatically split long content across multiple slides.")
-    text_input = st.text_area("Enter the topic or text for your presentation:", height=200, value="The importance of renewable energy. Discuss solar, wind, and hydro power. Cover the environmental benefits, economic advantages, and future challenges of transitioning to a green economy.")
+    st.info("The AI will now create a structured 6-slide presentation with a title and conclusion.")
+    text_input = st.text_area("Enter the topic or text for your presentation:", height=200, 
+        value="The importance of renewable energy. Discuss solar, wind, and hydro power. Cover the environmental benefits, economic advantages, and future challenges of transitioning to a green economy.")
     if st.button("🚀 Generate Presentation"):
         if text_input:
             ppt_buffer = generate_ppt_from_text(text_input, user_images, auto_image, pexels_key, template_file)
